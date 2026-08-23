@@ -1,0 +1,143 @@
+<!--
+  Custom Wazuh Rules — Brute Force & Network Correlation
+  File: custom-rules/brute_force_correlation.xml
+  Target: /var/ossec/etc/rules/local_rules.xml (or included via ossec.conf)
+
+  Rule ID range 100000-119999 is reserved for local/custom rules in Wazuh,
+  so all rules below live in that range to avoid colliding with the
+  default ruleset.
+
+  After editing, always validate before restarting:
+    sudo /var/ossec/bin/wazuh-logtest
+    sudo systemctl restart wazuh-manager
+-->
+
+<group name="local,brute_force,">
+
+  <!-- ============================================================
+       1. SSH BRUTE FORCE (host-based, from sshd/auth logs)
+       ============================================================ -->
+
+  <rule id="100100" level="5">
+    <if_sid>5716</if_sid>
+    <match>Failed password</match>
+    <description>SSH authentication failed</description>
+    <group>authentication_failed,ssh,</group>
+  </rule>
+
+  <rule id="100101" level="10" frequency="6" timeframe="120">
+    <if_matched_sid>100100</if_matched_sid>
+    <same_source_ip />
+    <description>SSH brute force attempt: multiple failed logins from the same source IP</description>
+    <mitre>
+      <id>T1110.001</id>
+    </mitre>
+    <group>authentication_failures,brute_force,ssh,</group>
+  </rule>
+
+  <rule id="100102" level="12" frequency="10" timeframe="120">
+    <if_matched_sid>100100</if_matched_sid>
+    <same_source_ip />
+    <description>High-volume SSH brute force: sustained failed logins from the same source IP</description>
+    <mitre>
+      <id>T1110.001</id>
+    </mitre>
+    <group>authentication_failures,brute_force,ssh,</group>
+  </rule>
+
+  <!-- ============================================================
+       2. RDP BRUTE FORCE (Windows agent, Event ID 4625)
+       ============================================================ -->
+
+  <rule id="100110" level="5">
+    <if_sid>60122</if_sid>
+    <description>Windows RDP/logon authentication failed</description>
+    <group>authentication_failed,rdp,windows,</group>
+  </rule>
+
+  <rule id="100111" level="10" frequency="6" timeframe="120">
+    <if_matched_sid>100110</if_matched_sid>
+    <same_source_ip />
+    <description>RDP brute force attempt: multiple failed Windows logons from the same source IP</description>
+    <mitre>
+      <id>T1110.001</id>
+    </mitre>
+    <group>authentication_failures,brute_force,rdp,windows,</group>
+  </rule>
+
+  <!-- ============================================================
+       3. SURICATA NETWORK ALERT CATEGORIZATION
+       ============================================================ -->
+
+  <rule id="100120" level="7">
+    <if_sid>86601</if_sid>
+    <match>Brute</match>
+    <description>Suricata detected a network-based brute-force signature</description>
+    <group>suricata,brute_force,ids,</group>
+  </rule>
+
+  <rule id="100121" level="7">
+    <if_sid>86601</if_sid>
+    <match>Scan</match>
+    <description>Suricata detected network scanning activity</description>
+    <group>suricata,recon,ids,</group>
+  </rule>
+
+  <!-- ============================================================
+       4. CORRELATION — HOST + NETWORK (the payoff rules)
+       ============================================================ -->
+
+  <!-- SSH brute force confirmed by matching Suricata network signature -->
+  <rule id="100130" level="15" frequency="1" timeframe="180">
+    <if_matched_sid>100101</if_matched_sid>
+    <if_sid>100120</if_sid>
+    <same_source_ip />
+    <description>Correlated brute-force attack: SSH auth failures + Suricata network IDS alert from the same source IP</description>
+    <mitre>
+      <id>T1110.001</id>
+    </mitre>
+    <group>brute_force,correlation,attack,ssh,</group>
+  </rule>
+
+  <!-- RDP brute force confirmed by matching Suricata network signature -->
+  <rule id="100131" level="15" frequency="1" timeframe="180">
+    <if_matched_sid>100111</if_matched_sid>
+    <if_sid>100120</if_sid>
+    <same_source_ip />
+    <description>Correlated brute-force attack: RDP auth failures + Suricata network IDS alert from the same source IP</description>
+    <mitre>
+      <id>T1110.001</id>
+    </mitre>
+    <group>brute_force,correlation,attack,rdp,</group>
+  </rule>
+
+  <!-- Recon (scan) immediately followed by brute force = likely staged attack -->
+  <rule id="100132" level="14" frequency="1" timeframe="600">
+    <if_matched_sid>100121</if_matched_sid>
+    <if_sid>100101,100111</if_sid>
+    <same_source_ip />
+    <description>Multi-stage attack pattern: network scan followed by brute-force login attempts from the same source IP</description>
+    <mitre>
+      <id>T1595</id>
+      <id>T1110.001</id>
+    </mitre>
+    <group>correlation,attack,recon,brute_force,</group>
+  </rule>
+
+  <!-- ============================================================
+       5. SUCCESSFUL LOGIN AFTER BRUTE FORCE (compromise indicator)
+       ============================================================ -->
+
+  <rule id="100140" level="15" frequency="1" timeframe="300">
+    <if_matched_sid>100101</if_matched_sid>
+    <if_sid>5715</if_sid>
+    <same_source_ip />
+    <description>Possible successful compromise: SSH login succeeded shortly after brute-force attempts from the same source IP</description>
+    <mitre>
+      <id>T1110.001</id>
+      <id>T1078</id>
+    </mitre>
+    <group>brute_force,correlation,attack,compromise,ssh,</group>
+  </rule>
+
+</group>
