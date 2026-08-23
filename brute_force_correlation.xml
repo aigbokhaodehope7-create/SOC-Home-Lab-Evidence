@@ -1,0 +1,28 @@
+<!--
+  Custom correlation rule: fires when repeated authentication failures
+  (SSH brute force on Metasploitable3) occur alongside a Suricata
+  network-based brute-force signature within the same time window.
+
+  Place this inside <group name="local,"> in
+  /var/ossec/etc/rules/local_rules.xml on the Wazuh manager.
+-->
+
+<group name="local,brute_force_correlation,">
+
+  <!-- Base rule: multiple SSH auth failures from sshd (built-in Wazuh rule 5716 is similar; this is a simplified local version) -->
+  <rule id="100100" level="10" frequency="6" timeframe="120">
+    <if_matched_group>authentication_failed</if_matched_group>
+    <same_source_ip />
+    <description>Multiple authentication failures from the same source IP (possible brute force)</description>
+    <group>authentication_failures,brute_force,</group>
+  </rule>
+
+  <!-- Correlation rule: combine host-based brute force detection above with a Suricata network alert -->
+  <rule id="100101" level="15" frequency="1" timeframe="180">
+    <if_matched_sid>100100</if_matched_sid>
+    <field name="rule.groups">suricata</field>
+    <description>Correlated brute-force attack: host auth failures + Suricata network IDS alert on same source</description>
+    <group>brute_force,correlation,attack,</group>
+  </rule>
+
+</group>
