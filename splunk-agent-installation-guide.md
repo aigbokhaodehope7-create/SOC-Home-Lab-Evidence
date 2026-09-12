@@ -1,0 +1,346 @@
+# SIEM Lab: Splunk + Suricata + Snort Integration
+
+A home-lab build documenting a Splunk Enterprise deployment on Ubuntu, a Splunk
+Universal Forwarder on Windows 10, and ingestion pipelines for **Suricata**
+and **Snort** IDS alerts into Splunk for correlation and dashboarding.
+
+> Fill in the bracketed placeholders (`[ ]`) with your actual versions and IPs
+> before publishing.
+
+---
+
+## 1. Lab Architecture
+
+```mermaid
+flowchart LR
+    subgraph WIN["Windows 10 Host"]
+        SNORT[Snort IDS] -->|alert log| UF[Splunk Universal Forwarder]
+    end
+    subgraph LINUX["Ubuntu Host - Sensor"]
+        SURI[Suricata IDS] -->|eve.json| UF2[Splunk Universal Forwarder]
+    end
+    subgraph SPLUNK["Ubuntu Host - Splunk Enterprise"]
+        IDX[Splunk Indexer / Search Head]
+    end
+    UF -->|TCP 9997| IDX
+    UF2 -->|TCP 9997| IDX
+```
+
+| Component | Role | OS | IP (example) |
+|---|---|---|---|
+| Splunk Enterprise | Indexer / Search Head | Ubuntu 22.04 LTS | `192.168.1.10` |
+| Suricata | Network IDS | Ubuntu 22.04 LTS | `192.168.1.20` |
+| Snort | Network IDS | Windows 10 | `192.168.1.30` |
+| Universal Forwarder | Log shipper | Windows 10 / Ubuntu | — |
+
+---
+
+## 2. Installing Splunk Enterprise on Ubuntu
+
+### 2.1 Prerequisites
+```bash
+sudo apt update && sudo apt upgrade -y
+sudo hostnamectl set-hostname splunk-server
+```
+
+### 2.2 Download and Install
+Download the `.deb` package from [splunk.com/download](https://www.splunk.com/en_us/download/splunk-enterprise.html)
+(requires a free account) — version used here: `[Splunk Enterprise 9.x.x]`.
+
+```bash
+wget -O splunk.deb "https://download.splunk.com/products/splunk/releases/[VERSION]/linux/splunk-[VERSION]-linux-2.6-amd64.deb"
+sudo dpkg -i splunk.deb
+```
+
+### 2.3 Start Splunk and Accept License
+```bash
+sudo /opt/splunk/bin/splunk start --accept-license
+```
+- Set the admin username/password when prompted.
+- Splunk Web is now reachable at `http://192.168.1.10:8000`.
+
+### 2.4 Enable Boot Start
+```bash
+sudo /opt/splunk/bin/splunk enable boot-start -user splunk
+```
+
+### 2.5 Open Firewall Ports
+```bash
+sudo ufw allow 8000/tcp   # Splunk Web
+sudo ufw allow 8089/tcp   # Management port
+sudo ufw allow 9997/tcp   # Forwarder receiving port
+```
+
+### 2.6 Enable a Receiving Port for Forwarders
+In Splunk Web: **Settings → Forwarding and receiving → Configure receiving → New Receiving Port → 9997**
+
+Or via CLI:
+```bash
+sudo /opt/splunk/bin/splunk enable listen 9997 -auth admin:[password]
+```
+
+### 2.7 Create Indexes
+**Settings → Indexes → New Index**, create:
+- `suricata`
+- `snort`
+
+---
+
+## 3. Installing and Configuring the Splunk Universal Forwarder (Agent)
+
+The **Universal Forwarder (UF)** is the lightweight "agent" installed on
+every host that needs to ship logs to the Splunk indexer. This section
+covers the agent in general (what it is, its core config files, and how to
+manage it), followed by OS-specific install steps.
+
+### 3.1 What the Agent Does
+- Watches files/directories or Windows Event Logs you point it at.
+- Forwards raw or structured data to the indexer over TCP `9997`.
+- Has no search head/web UI of its own — administration is via CLI or a
+  deployment server.
+
+### 3.2 Core Configuration Files
+Regardless of OS, the agent is driven by three `.conf` files under
+`etc/system/local/` (Linux) or `etc\system\local\` (Windows):
+
+| File | Purpose |
+|---|---|
+| `inputs.conf` | What to monitor (files, ports, WinEventLog channels) |
+| `outputs.conf` | Where to send data (the indexer's host/IP and port) |
+| `deploymentclient.conf` | (Optional) Points the agent at a deployment server for centralized app/config push |
+
+**`outputs.conf` example** (used instead of the install wizard if you're
+configuring manually or pushing config via deployment server):
+```ini
+[tcpout]
+defaultGroup = default-autolb-group
+
+[tcpout:default-autolb-group]
+server = 192.168.1.10:9997
+
+[tcpout-server://192.168.1.10:9997]
+```
+
+**`deploymentclient.conf` example** (only needed if using a deployment
+server to centrally manage multiple agents):
+```ini
+[deployment-client]
+
+[target-broker:deploymentServer]
+targetUri = 192.168.1.10:8089
+```
+
+### 3.3 Download the Agent
+Download the Universal Forwarder package for your target OS from
+[splunk.com/download](https://www.splunk.com/en_us/download/universal-forwarder.html)
+(free account required) — version used here: `[9.x.x]`.
+
+### 3.4 Managing the Agent (CLI Reference)
+```bash
+# Linux
+sudo /opt/splunkforwarder/bin/splunk status
+sudo /opt/splunkforwarder/bin/splunk restart
+sudo /opt/splunkforwarder/bin/splunk list forward-server
+```
+```powershell
+# Windows
+Get-Service SplunkForwarder
+Restart-Service SplunkForwarder
+& "C:\Program Files\SplunkUniversalForwarder\bin\splunk.exe" list forward-server
+```
+
+### 3.5 Installing on Windows 10
+Download the Windows 64-bit Universal Forwarder `.msi` from Splunk's site —
+version `[9.x.x]`.
+
+### 3.6 Install
+Run the installer:
+1. Accept the license agreement.
+2. Choose **"On this Windows machine"** for local forwarding.
+3. Set a forwarder admin password.
+4. Under **Deployment Server**, leave blank if not using one, or point it to
+   your deployment server.
+5. Under **Receiving Indexer**, enter:
+   - Hostname/IP: `192.168.1.10`
+   - Port: `9997`
+6. Finish the install — the service `SplunkForwarder` starts automatically.
+
+### 3.7 Verify via CLI (optional)
+```powershell
+cd "C:\Program Files\SplunkUniversalForwarder\bin"
+.\splunk.exe list forward-server
+```
+
+### 3.8 Configure Snort Log Monitoring
+Edit (or create) `C:\Program Files\SplunkUniversalForwarder\etc\system\local\inputs.conf`:
+
+```ini
+[monitor://C:\Snort\log\alert.ids]
+disabled = false
+index = snort
+sourcetype = snort_alert
+```
+
+Restart the forwarder service:
+```powershell
+Restart-Service SplunkForwarder
+```
+
+---
+
+## 4. Installing and Configuring Snort (Windows 10)
+
+### 4.1 Install
+1. Download Snort for Windows and **Npcap** (required dependency, install in
+   WinPcap-compatible mode) from their official sites.
+2. Install Snort to `C:\Snort`.
+3. Download community rules and place them in `C:\Snort\rules`.
+
+### 4.2 Configure
+Edit `C:\Snort\etc\snort.conf`:
+- Set `HOME_NET` to your local subnet, e.g. `192.168.1.0/24`.
+- Set `RULE_PATH` to `C:\Snort\rules`.
+
+### 4.3 Run Snort in IDS Mode
+```powershell
+cd C:\Snort\bin
+.\snort.exe -i [interface_number] -c C:\Snort\etc\snort.conf -l C:\Snort\log -A fast
+```
+This writes alerts to `C:\Snort\log\alert.ids`, which the Universal Forwarder
+monitors per §3.8.
+
+### 4.4 Sourcetype Field Extraction
+In Splunk Web: **Settings → Sourcetypes**, confirm `snort_alert` events are
+parsing timestamps correctly. If not, add a custom `props.conf` on the
+indexer (`/opt/splunk/etc/system/local/props.conf`):
+
+```ini
+[snort_alert]
+TIME_PREFIX = ^
+TIME_FORMAT = %m/%d-%H:%M:%S.%6N
+SHOULD_LINEMERGE = false
+```
+
+---
+
+## 5. Installing and Configuring Suricata (Ubuntu Sensor)
+
+### 5.1 Install
+```bash
+sudo add-apt-repository ppa:oisf/suricata-stable -y
+sudo apt update
+sudo apt install suricata -y
+```
+
+### 5.2 Update Rules
+```bash
+sudo suricata-update
+sudo systemctl restart suricata
+```
+
+### 5.3 Configure the Monitoring Interface
+Edit `/etc/suricata/suricata.yaml`:
+```yaml
+af-packet:
+  - interface: eth0
+```
+Set `HOME_NET` under `vars.address-groups` to your subnet.
+
+### 5.4 Confirm eve.json Output
+Suricata logs structured JSON alerts to `/var/log/suricata/eve.json` by default.
+
+### 5.5 Enable and Start
+```bash
+sudo systemctl enable suricata
+sudo systemctl start suricata
+sudo systemctl status suricata
+```
+
+### 5.6 Install the Universal Forwarder on the Suricata Host
+```bash
+wget -O splunkforwarder.deb "https://download.splunk.com/products/universalforwarder/releases/[VERSION]/linux/splunkforwarder-[VERSION]-linux-2.6-amd64.deb"
+sudo dpkg -i splunkforwarder.deb
+sudo /opt/splunkforwarder/bin/splunk start --accept-license
+sudo /opt/splunkforwarder/bin/splunk add forward-server 192.168.1.10:9997 -auth admin:[password]
+```
+
+### 5.7 Monitor eve.json
+Create `/opt/splunkforwarder/etc/system/local/inputs.conf`:
+
+```ini
+[monitor:///var/log/suricata/eve.json]
+disabled = false
+index = suricata
+sourcetype = suricata_json
+```
+
+Restart the forwarder:
+```bash
+sudo /opt/splunkforwarder/bin/splunk restart
+```
+
+### 5.8 Splunk-Side Sourcetype (JSON auto-parses well by default)
+```ini
+[suricata_json]
+INDEXED_EXTRACTIONS = json
+KV_MODE = none
+TIME_PREFIX = "timestamp":"
+TIME_FORMAT = %Y-%m-%dT%H:%M:%S.%6N%z
+SHOULD_LINEMERGE = false
+```
+
+---
+
+## 6. Verification
+
+1. **Settings → Forwarder Management** (or `search index=_internal source=*metrics.log group=tcpin_connections`)
+   confirms both forwarders are connected.
+2. Run a search:
+   ```
+   index=suricata OR index=snort
+   | stats count by index, sourcetype
+   ```
+3. Generate test traffic (e.g. `ping`, an `nmap` scan, or an EICAR test file)
+   and confirm alerts appear within a minute.
+
+---
+
+## 7. Example Dashboard Searches
+
+**Top alert signatures (Suricata):**
+```
+index=suricata sourcetype=suricata_json event_type=alert
+| stats count by alert.signature
+| sort -count
+```
+
+**Snort alerts by source IP:**
+```
+index=snort sourcetype=snort_alert
+| rex field=_raw "\{(?<src_ip>[0-9\.]+)\}\s*->\s*\{(?<dest_ip>[0-9\.]+)\}"
+| stats count by src_ip
+| sort -count
+```
+
+---
+
+## 8. Troubleshooting Notes
+
+| Symptom | Likely Cause | Fix |
+|---|---|---|
+| Forwarder shows "Down" in Forwarder Management | Firewall blocking 9997 | Check `ufw`/Windows Firewall rules |
+| No `eve.json` events in Splunk | Wrong monitor path or Suricata not running | `systemctl status suricata`; verify path |
+| Snort alerts not appearing | Forwarder not restarted after `inputs.conf` edit | Restart `SplunkForwarder` service |
+| Timestamps parsed incorrectly | Missing/incorrect `TIME_FORMAT` in `props.conf` | Adjust per §4.4 / §5.8 |
+
+---
+
+## 9. References
+- [Splunk Enterprise Documentation](https://docs.splunk.com/Documentation/Splunk)
+- [Splunk Universal Forwarder Documentation](https://docs.splunk.com/Documentation/Forwarder)
+- [Suricata Documentation](https://docs.suricata.io/)
+- [Snort Documentation](https://www.snort.org/documents)
+
+---
+
+Aigbokhaode Hope Imomoh
