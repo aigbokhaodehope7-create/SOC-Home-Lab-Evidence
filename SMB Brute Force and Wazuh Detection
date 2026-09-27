@@ -1,0 +1,385 @@
+SMB Brute-Force Attack & Wazuh Detection Lab
+
+A hands-on cybersecurity lab demonstrating how an SMB password-guessing attack can be performed in an isolated Active Directory environment and detected using Wazuh SIEM.
+
+«Lab environment: VirtualBox home lab
+Purpose: Security testing, detection engineering, and SIEM validation
+MITRE ATT&CK: T1110.001 — Password Guessing»
+
+---
+
+📌 Project Overview
+
+This project simulates an SMB brute-force attack against a domain-joined Windows Server 2019 machine using Kali Linux.
+
+The objective was not only to perform the attack, but also to follow the activity from the attacker machine to the Windows endpoint and finally into Wazuh.
+
+During the exercise, I discovered that Windows auditing was initially disabled. This prevented failed authentication events from being generated and created a detection gap.
+
+After enabling the appropriate Windows auditing policies, the attack generated Windows Security Event ID 4625, which was successfully collected by Wazuh and matched by custom detection rules.
+
+---
+
+🏗️ Lab Architecture
+
+Role| System| IP Address| Purpose
+Attacker| Kali Linux| "192.168.56.102"| SMB authentication testing
+Target| Windows Server 2019| "192.168.56.116"| SMB/Active Directory target
+SIEM| Ubuntu + Wazuh| "192.168.56.101"| Log collection and detection
+
+Active Directory Domain: "HopeLabs.Local"
+
+Test Account: "HR-STAFF1"
+
+---
+
+🎯 Objectives
+
+- Test SMB authentication against a Windows Server.
+- Simulate password-guessing activity.
+- Observe Windows authentication events.
+- Identify gaps in endpoint logging.
+- Configure Windows auditing.
+- Forward security events to Wazuh.
+- Create custom Wazuh detection rules.
+- Detect repeated failed authentication attempts.
+- Map the activity to MITRE ATT&CK.
+
+---
+
+🔎 1. SMB Enumeration
+
+The target SMB service was first tested using "smbclient".
+
+smbclient -L //192.168.56.116 -U 'Hopelabs\HR-STAFF1'
+
+The target returned standard Windows shares:
+
+ADMIN$
+C$
+IPC$
+Users
+
+This confirmed that:
+
+- The target was reachable.
+- SMB was accessible.
+- The account could authenticate.
+- The SMB service was responding.
+
+The SMB1 workgroup listing returned:
+
+NT_STATUS_RESOURCE_NAME_NOT_FOUND
+
+This did not prevent SMB authentication and was consistent with SMB1 being disabled on the modern Windows system.
+
+---
+
+🔐 2. SMB Authentication Testing
+
+The first tool tested was THC-Hydra.
+
+hydra -l HR-STAFF1 -p passwords.txt -t 1 192.168.56.116 smb
+
+Hydra returned:
+
+[ERROR] invalid reply from target
+
+Additional SMB module and connection options were tested, but the authentication process did not complete successfully.
+
+The lab was therefore continued using CrackMapExec, which successfully handled the SMB authentication process against the target.
+
+---
+
+🧪 3. Password-Guessing Simulation
+
+CrackMapExec was used to test the credentials against the SMB service.
+
+crackmapexec smb 192.168.56.116 -u HR-STAFF1 -p passwords.txt -d HopeLabs.Local
+
+The test produced failed authentication responses followed by a successful authentication:
+
+[-] HopeLabs.Local\HR-STAFF1:msfadmin    STATUS_LOGON_FAILURE
+[-] HopeLabs.Local\HR-STAFF1:kali        STATUS_LOGON_FAILURE
+[-] HopeLabs.Local\HR-STAFF1:vagrant     STATUS_LOGON_FAILURE
+[-] HopeLabs.Local\HR-STAFF1:ubuntu      STATUS_LOGON_FAILURE
+[+] HopeLabs.Local\HR-STAFF1:Hope199872
+
+This confirmed that the test account was being authenticated through the domain and that incorrect passwords were generating authentication failures.
+
+---
+
+🛡️ 4. Wazuh Detection Investigation
+
+After performing the authentication tests, the Windows Security logs were checked to determine whether the failed attempts were being recorded.
+
+The Windows audit policy was checked using:
+
+auditpol /get /category:"Logon/Logoff"
+
+The relevant categories were initially configured as:
+
+No Auditing
+
+This explained why the expected authentication events were not appearing in Wazuh.
+
+Detection Gap
+
+The Wazuh agent was running and connected to the manager, but the endpoint was not generating the required Windows Security events.
+
+This demonstrated an important SIEM troubleshooting principle:
+
+No Event Generated
+        ↓
+Nothing to Forward
+        ↓
+Nothing for Wazuh to Detect
+
+---
+
+⚙️ 5. Enabling Windows Auditing
+
+Successful and failed logon auditing was enabled:
+
+auditpol /set /subcategory:"Logon" /success:enable /failure:enable
+
+Logoff auditing was also enabled:
+
+auditpol /set /subcategory:"Logoff" /success:enable /failure:enable
+
+The configuration was verified:
+
+auditpol /get /category:"Logon/Logoff"
+
+The relevant categories now showed:
+
+Success and Failure
+
+---
+
+🚨 6. Wazuh Detection
+
+The authentication test was repeated after enabling Windows auditing.
+
+Windows began generating:
+
+Event ID: 4625
+
+Event ID 4625 represents a failed logon attempt.
+
+Wazuh successfully collected the event from the Windows Server and applied custom detection rules.
+
+Custom Wazuh Rules
+
+Rule ID| Level| Description
+"100100"| 10| Windows Failed Login Detected
+"100101"| 12| Multiple Windows Failed Logons Detected – Possible Brute Force
+
+---
+
+📊 7. Detected Event
+
+A captured event contained information similar to:
+
+data.win.system.eventID:              4625
+data.win.system.channel:              Security
+data.win.system.computer:             DESKTOP-T6T1N2V.HopeLabs.Local
+data.win.eventdata.targetUserName:    HR-STAFF1
+data.win.eventdata.targetDomainName:  HopeLabs.Local
+data.win.eventdata.ipAddress:         192.168.56.102
+data.win.eventdata.ipPort:            33128
+data.win.eventdata.authenticationPackageName: NTLM
+data.win.eventdata.logonProcessName:  NtLmSsp
+data.win.eventdata.logonType:         3
+
+Important Fields
+
+Event ID 4625
+
+Indicates that the authentication attempt failed.
+
+Source IP
+
+192.168.56.102
+
+Identifies the Kali Linux system generating the authentication attempts.
+
+Target Account
+
+HR-STAFF1
+
+Identifies the account being targeted.
+
+Logon Type
+
+3
+
+Indicates a network logon. In this lab, this was consistent with SMB authentication.
+
+Authentication Package
+
+NTLM
+
+The event showed that NTLM was involved in the authentication process.
+
+---
+
+🧠 8. Detection Flow
+
+The final detection path was:
+
+Kali Linux
+     │
+     │ SMB authentication attempts
+     ▼
+Windows Server 2019
+     │
+     │ Event ID 4625
+     ▼
+Wazuh Agent
+     │
+     │ Log forwarding
+     ▼
+Wazuh Manager
+     │
+     │ Custom rules
+     ▼
+Rule 100100
+     │
+     │ Repeated failures
+     ▼
+Rule 100101
+     │
+     ▼
+Brute-Force Detection
+
+---
+
+🗺️ 9. MITRE ATT&CK Mapping
+
+Tactic| Technique| ID
+Credential Access| Brute Force: Password Guessing| "T1110.001"
+Discovery| Network Share Discovery| "T1135"
+Defense Evasion| Impair Defenses: Disable or Modify System Logging| "T1562.002"
+
+---
+
+🔍 10. Key Findings
+
+Finding 1 — SMB Tool Compatibility
+
+The initial SMB testing tool did not successfully complete authentication against the target. A different SMB testing tool was able to communicate with the target and perform the authentication tests.
+
+Finding 2 — Domain Context
+
+Providing the Active Directory domain improved authentication reliability:
+
+-d HopeLabs.Local
+
+Finding 3 — Logging Was Initially Disabled
+
+The most important detection issue was discovered on the Windows endpoint.
+
+The Wazuh agent was functioning, but Windows was not generating the required authentication events because auditing was disabled.
+
+Finding 4 — Wazuh Detection Worked After Logging Was Enabled
+
+Once Windows auditing was configured correctly:
+
+Authentication Attempt
+        ↓
+Windows Event 4625
+        ↓
+Wazuh Agent
+        ↓
+Wazuh Manager
+        ↓
+Custom Detection Rule
+        ↓
+Alert
+
+The complete detection pipeline worked as expected.
+
+---
+
+📚 Lessons Learned
+
+This lab reinforced several practical SOC concepts:
+
+- SIEM detection depends on endpoint telemetry.
+- An agent being connected does not guarantee that useful security events are being generated.
+- Windows audit policies should be checked when authentication events are missing.
+- Event ID 4625 is useful for detecting failed Windows authentication.
+- Source IP addresses can help identify the system generating authentication attempts.
+- Logon Type can provide useful context about how authentication occurred.
+- Repeated authentication failures can be correlated into a brute-force detection.
+- Detection engineering requires validating both the attack and the logging pipeline.
+
+---
+
+🚀 Future Improvements
+
+The next phase of the project will focus on expanding the detection capabilities.
+
+Planned Improvements
+
+- [ ] Configure Wazuh Active Response.
+- [ ] Test automated response to repeated authentication failures.
+- [ ] Build source-IP based detection.
+- [ ] Create a Sigma version of the detection logic.
+- [ ] Add additional Windows authentication detections.
+- [ ] Test account lockout detection.
+- [ ] Integrate threat-intelligence sources.
+- [ ] Expand the lab to include Suricata.
+- [ ] Build additional Wazuh correlation rules.
+- [ ] Develop a complete SOC monitoring dashboard.
+
+---
+
+🛠️ Technologies Used
+
+- Kali Linux
+- Windows Server 2019
+- Active Directory
+- SMB
+- Ubuntu
+- Wazuh SIEM
+- CrackMapExec
+- Hydra
+- Windows Event Viewer
+- Windows Audit Policy
+- MITRE ATT&CK
+
+---
+
+📁 Project Purpose
+
+This project was built as part of my hands-on cybersecurity and SOC analyst learning journey.
+
+The goal was to understand the complete lifecycle of a security event:
+
+Attack
+  ↓
+Endpoint Activity
+  ↓
+Windows Security Event
+  ↓
+Log Collection
+  ↓
+SIEM Analysis
+  ↓
+Detection Rule
+  ↓
+Security Alert
+
+The lab demonstrates how offensive security testing can be combined with defensive monitoring to validate whether a security monitoring environment is capable of detecting credential attacks.
+
+---
+
+Author
+
+Aigbokhaode Hope Imomoh
+
+Cybersecurity | SOC Analysis | SIEM | Threat Detection | Active Directory
+
+---
